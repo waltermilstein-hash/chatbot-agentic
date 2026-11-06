@@ -1,0 +1,44 @@
+# =============================================================================
+# Config SANEADA para la tesis (chatbot). CERO secretos reales.
+# Apunta a la infra dockerizada de la tesis en 127.0.0.7. Las claves de IA van
+# por entorno (.env): OPENAI_APIKEY se lee del entorno (override en el loader).
+# =============================================================================
+
+# MongoDB — standalone de la tesis (sin auth, sin replicaSet)
+mongodb:
+  db: "gen-ai"
+  uri: "mongodb://127.0.0.7:27017/"
+  collection_name: "config_postgresql"
+
+# Redis — tesis
+redis:
+  host: "127.0.0.7"
+  port: 6379
+  decode_responses: true
+  encoding: "utf-8"
+  db: 0
+  password: ""
+  username: ""
+
+ray:
+  address: "local"
+
+# Weaviate — base vectorial de la tesis
+weaviate:
+  url: "http://127.0.0.7:8087"
+
+# OpenAI — la clave real se toma de OPENAI_APIKEY (entorno), no de aquí
+openai_key:
+  key: ""
+
+config:
+  model_3.5: "gpt-3.5-turbo"
+  model_4: "gpt-4o"
+
+# Graylog — GELF de la tesis
+graylog:
+  enabled: false
+  host: "127.0.0.7"
+  port: 12201
+  source: "tesis-chatbot"
+  retention_days: 90

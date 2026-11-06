@@ -1,0 +1,21 @@
+# Traefik static config. Routing dinámico por labels de Docker en la red `platform_edge`.
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+api:
+  dashboard: true
+  insecure: true          # dashboard en :8080 sin auth -> solo loopback (127.0.0.1:8090). En pro: false + auth.
+
+providers:
+  docker:
+    exposedByDefault: false     # solo enruta servicios con label traefik.enable=true
+    network: unsl-tesis-net
+  file:
+    directory: /etc/traefik/dynamic   # middlewares: allow-lan (IP) + auth-<proj> (basicAuth)
+    watch: true
+
+log:
+  level: INFO

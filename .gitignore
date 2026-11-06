@@ -1,0 +1,24 @@
+# Secretos / entornos — NUNCA versionar (contienen API keys)
+.env
+*.env
+**/.env
+!.env.example
+!**/.env.example
+
+# Virtualenvs
+.venv/
+**/.venv/
+venv/
+**/venv/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# Config de tesis con endpoints (dejar solo el ejemplo)
+# (si tu config.yml llevara secretos, descomentá:)
+# chatbot/config/config.yml

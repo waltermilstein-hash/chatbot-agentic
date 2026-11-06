@@ -1,0 +1,312 @@
+# =============================================================================
+# Universidad de San Luis — Tesis · Infraestructura de EVENTOS y DATOS (solo contenedores)
+# Author: @Raven
+# -----------------------------------------------------------------------------
+# El DESARROLLO (chatbot + agente, Python) corre FUERA de Docker, en el host, y
+# se conecta a estos servicios por 127.0.0.7. Aquí NO hay código de aplicación:
+# solo las piezas de datos y mensajería.
+#
+#   · datos:     mongo, redis, weaviate
+#   · eventos:   kafka (KRaft, sin zookeeper)
+#   · objetos:   minio
+#
+# Todos los puertos se publican en la IP de loopback 127.0.0.7 (red sintética de
+# la tesis) y cada contenedor lleva "-tesis-" en el nombre.
+#
+# Arranque:   cp .env.example .env   &&   docker compose up -d
+# =============================================================================
+name: unsl-tesis
+
+services:
+
+  mongo:
+    image: mongo:7
+    container_name: unsl-tesis-mongo
+    restart: unless-stopped
+    ports:
+      - "127.0.0.7:27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks: [tesis]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: unsl-tesis-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.7:6379:6379"
+    volumes:
+      - redis_data:/data
+    networks: [tesis]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  weaviate:
+    image: semitechnologies/weaviate:1.25.6
+    container_name: unsl-tesis-weaviate
+    restart: unless-stopped
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      ENABLE_MODULES: ""
+      QUERY_DEFAULTS_LIMIT: "25"
+      CLUSTER_HOSTNAME: "node1"
+    ports:
+      - "127.0.0.7:8087:8080"      # host 8087 → weaviate 8080
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    networks: [tesis]
+
+  kafka:
+    image: apache/kafka:3.8.0        # KRaft: un solo contenedor, sin zookeeper
+    container_name: unsl-tesis-kafka
+    restart: unless-stopped
+    ports:
+      - "127.0.0.7:9092:9092"
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      # El dev corre en el host y habla por 127.0.0.7 → se anuncia esa dirección.
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://127.0.0.7:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks: [tesis]
+
+  minio:
+    build: ./minio          # imagen custom (binario MinIO desde GitHub Releases)
+    container_name: unsl-tesis-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-veritas_admin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-veritas_admin_tesis}"
+    ports:
+      - "127.0.0.7:9000:9000"       # API S3
+      - "127.0.0.7:9001:9001"       # consola web
+    volumes:
+      - minio_data:/data
+    networks: [tesis]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ── Graylog: motor de búsqueda de logs (OpenSearch) ──
+  opensearch:
+    image: opensearchproject/opensearch:2.15.0
+    container_name: unsl-tesis-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: "single-node"
+      plugins.security.disabled: "true"
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      action.auto_create_index: "false"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile:  { soft: 65536, hard: 65536 }
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    networks: [tesis]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ── Graylog: gestión centralizada de logs (usa el Mongo de arriba) ──
+  graylog:
+    image: graylog/graylog:6.1
+    container_name: unsl-tesis-graylog
+    restart: unless-stopped
+    environment:
+      GRAYLOG_PASSWORD_SECRET: "${GRAYLOG_PASSWORD_SECRET:-tesis_pepper_cambialo_16+}"
+      # sha256 de la contraseña de admin. Default = 'admin'.
+      GRAYLOG_ROOT_PASSWORD_SHA2: "${GRAYLOG_ROOT_PASSWORD_SHA2:-8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918}"
+      GRAYLOG_HTTP_EXTERNAL_URI: "http://127.0.0.7:9900/"
+      GRAYLOG_MONGODB_URI: "mongodb://mongo:27017/graylog"
+      GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
+    ports:
+      - "127.0.0.7:9900:9000"        # consola web Graylog (9900 para no chocar con MinIO)
+      - "127.0.0.7:12201:12201/udp"  # entrada GELF UDP
+      - "127.0.0.7:12201:12201/tcp"  # entrada GELF TCP
+      - "127.0.0.7:1514:1514/udp"    # entrada syslog UDP
+    volumes:
+      - graylog_data:/usr/share/graylog/data
+    networks: [tesis]
+    depends_on:
+      mongo: { condition: service_started }
+      opensearch: { condition: service_started }
+
+  # ── Claim-check: crea el bucket de MinIO donde viven los PAYLOADS ──
+  # Patrón claim-check: Kafka transporta SOLO la referencia (bucket/clave);
+  # el archivo real se guarda en MinIO. Este one-shot deja el bucket listo.
+  minio-setup:
+    build: ./minio          # misma imagen custom (incluye el cliente mc)
+    container_name: unsl-tesis-minio-setup
+    restart: "no"
+    depends_on:
+      minio: { condition: service_started }
+    networks: [tesis]
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-veritas_admin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-veritas_admin_tesis}"
+      MINIO_BUCKET: "${MINIO_BUCKET:-unsl-documentos}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        until mc alias set tesis http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          echo 'esperando a MinIO...'; sleep 2;
+        done;
+        mc mb -p "tesis/$$MINIO_BUCKET" || true;
+        echo "claim-check: bucket '$$MINIO_BUCKET' listo en MinIO";
+
+  # ═════════════════ OBSERVABILIDAD / TELEMETRÍA (perfil: obs) ═════════════════
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: unsl-tesis-prometheus
+    profiles: ["obs"]
+    restart: unless-stopped
+    user: "65534:65534"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # scrapear apps del HOST (dev por fuera)
+    ports:
+      - "127.0.0.7:9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks: [tesis]
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: unsl-tesis-tempo
+    profiles: ["obs"]
+    restart: unless-stopped
+    user: "10001:10001"
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./config/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    networks: [tesis]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: unsl-tesis-otel
+    profiles: ["obs"]
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      - "127.0.0.7:4317:4317"   # OTLP gRPC (apps del host)
+      - "127.0.0.7:4318:4318"   # OTLP HTTP
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otel/config.yaml:ro
+    networks: [tesis]
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: unsl-tesis-grafana
+    profiles: ["obs"]
+    restart: unless-stopped
+    user: "472:472"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "127.0.0.7:3000:3000"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    networks: [tesis]
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    container_name: unsl-tesis-mlflow
+    profiles: ["obs"]
+    restart: unless-stopped
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --serve-artifacts
+    ports:
+      - "127.0.0.7:5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    networks: [tesis]
+
+  # ═════════════════ REVERSE PROXY (perfil: proxy) ═════════════════
+  traefik:
+    image: traefik:v3.1
+    container_name: unsl-tesis-traefik
+    profiles: ["proxy"]
+    restart: unless-stopped
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - "127.0.0.7:80:80"
+      - "127.0.0.7:443:443"
+      - "127.0.0.7:8090:8080"   # dashboard (loopback)
+    volumes:
+      - ./config/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./config/traefik/dynamic:/etc/traefik/dynamic:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_acme:/acme
+    networks: [tesis]
+
+  # ═════════════════ PENTEST — toolbox a demanda (perfil: pentest) ═════════════════
+  # NO es un servicio permanente. Se corre efímero y ataca la infra loopback:
+  #   docker compose --profile pentest build pentest
+  #   docker compose --profile pentest run --rm pentest
+  pentest:
+    build:
+      context: ./pentest
+      dockerfile: Dockerfile.pentest
+    image: unsl-tesis-pentest-toolbox
+    container_name: unsl-tesis-pentest
+    profiles: ["pentest"]
+    network_mode: host          # acceso a 127.0.0.7:* (como pide su README)
+    stdin_open: true
+    tty: true
+
+networks:
+  tesis:
+    name: unsl-tesis-net
+    driver: bridge
+
+volumes:
+  mongo_data:
+  redis_data:
+  weaviate_data:
+  kafka_data:
+  minio_data:
+  opensearch_data:
+  graylog_data:
+  prometheus_data:
+  grafana_data:
+  tempo_data:
+  mlflow_data:
+  traefik_acme:

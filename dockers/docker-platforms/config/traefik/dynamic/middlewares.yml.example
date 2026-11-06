@@ -1,0 +1,17 @@
+# Plantilla del dynamic config de Traefik (el real, con hashes, está gitignored).
+# Generá los hashes:  openssl passwd -apr1 '<password>'   (o htpasswd -nbB user pass)
+http:
+  middlewares:
+    allow-lan:
+      ipAllowList:
+        sourceRange:
+          - "127.0.0.1/32"
+          - "192.168.1.42/32"     # tu IP de confianza
+    auth-garrido:
+      basicAuth:
+        users:
+          - 'garrido:$apr1$XXXXXXXX$XXXXXXXXXXXXXXXXXXXXXX'
+    auth-unsl:
+      basicAuth:
+        users:
+          - 'unsl:$apr1$XXXXXXXX$XXXXXXXXXXXXXXXXXXXXXX'
